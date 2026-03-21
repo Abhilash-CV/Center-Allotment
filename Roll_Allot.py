@@ -40,7 +40,7 @@ def validate_columns(df, required_cols, name):
 
 
 # -------------------------------
-# RUN BUTTON
+# MAIN PROCESS
 # -------------------------------
 if st.button("Run Allotment"):
 
@@ -70,22 +70,14 @@ if st.button("Run Allotment"):
         # -------------------------------
         # VALIDATE STRUCTURE
         # -------------------------------
-        validate_columns(labs,
-            ['collegecode', 'venueno', 'labname', 'noofsys'],
-            "Lab Details"
-        )
-
-        validate_columns(centres,
-            ['centrecode', 'centrename'],
-            "Centre Details"
-        )
-
+        validate_columns(labs, ['collegecode', 'venueno', 'labname', 'noofsys'], "Lab")
+        validate_columns(centres, ['centrecode', 'centrename'], "Centre")
         validate_columns(prefs, ['applno'], "Preferences")
         validate_columns(candidates, ['applno', 'name', 'eng', 'bpharm'], "Candidates")
         validate_columns(registrations, ['applno', 'paymentmode'], "Registrations")
 
         # -------------------------------
-        # CREATE CENTRE LOOKUP (JOIN)
+        # CENTRE LOOKUP (JOIN)
         # -------------------------------
         centre_lookup = dict(zip(
             centres['centrecode'],
@@ -93,7 +85,7 @@ if st.button("Run Allotment"):
         ))
 
         # -------------------------------
-        # BUILD CAPACITY
+        # CAPACITY BUILD
         # -------------------------------
         capacity = {}
         centre_name = {}
@@ -104,8 +96,6 @@ if st.button("Run Allotment"):
             code = row['collegecode']
 
             capacity[code] = capacity.get(code, 0) + int(row['noofsys'])
-
-            # JOIN mapping (Laravel equivalent)
             centre_name[code] = centre_lookup.get(code, f"UNKNOWN-{code}")
 
             venue_map.setdefault(code, []).append(row['venueno'])
@@ -130,13 +120,18 @@ if st.button("Run Allotment"):
             pref_map[row['applno']] = pref
 
         # -------------------------------
-        # FILTER CANDIDATES
+        # FILTER VALID CANDIDATES
         # -------------------------------
         valid_reg = registrations[
             registrations['paymentmode'].isin(['O', 'F'])
         ]
 
-        merged = candidates.merge(valid_reg, on="applno")
+        # ✅ FIXED MERGE (NO name_x issue)
+        merged = candidates.merge(
+            valid_reg,
+            on="applno",
+            suffixes=('', '_reg')
+        )
 
         merged = merged[
             (merged['eng'] == 'Y') | (merged['bpharm'] == 'Y')
@@ -145,7 +140,7 @@ if st.button("Run Allotment"):
         merged = merged.sort_values("applno")
 
         # -------------------------------
-        # ALLOTMENT PROCESS
+        # ALLOTMENT
         # -------------------------------
         results = []
 
@@ -171,7 +166,6 @@ if st.button("Run Allotment"):
                         allotted = centre
                         allotted_name = centre_name.get(centre, "-")
 
-                        # Same logic as PHP (first lab)
                         venue = venue_map.get(centre, ["-"])[0]
                         lab = lab_map.get(centre, ["-"])[0]
 
@@ -188,7 +182,7 @@ if st.button("Run Allotment"):
 
             results.append({
                 "ApplNo": applno,
-                "Name": cand['name'],
+                "Name": cand['name'],   # ✅ now safe
                 "Exam": exam,
                 "Pref": pref_centre,
                 "Allotted": allotted,
