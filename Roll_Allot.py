@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🎯 Centre Allotment System (Fully Corrected)")
+st.title("🎯 Centre Allotment System (Stable Version)")
 
 # -------------------------------
 # FILE UPLOADS
@@ -49,7 +49,6 @@ if st.button("Run Allotment"):
     # FILTER
     # -------------------------------
     valid = reg[reg['paymentmode'].isin(['O','F'])]
-
     merged = candidates.merge(valid, on="applno", suffixes=('','_r'))
     merged = merged[(merged['eng']=='Y') | (merged['bpharm']=='Y')]
     merged = merged.sort_values("applno")
@@ -58,51 +57,35 @@ if st.button("Run Allotment"):
     # LOOKUPS
     # -------------------------------
     centre_lookup = dict(zip(centres['centrecode'], centres['centrename']))
-    centre_district = dict(zip(centres['centrecode'], centres['centredistrict']))
 
     # -------------------------------
     # CAPACITY
     # -------------------------------
     capacity = {}
-    venue_map = {}
-    lab_map = {}
-
     for _, r in labs.iterrows():
         c = str(r['collegecode'])
         capacity[c] = capacity.get(c, 0) + int(r['noofsys'])
-        venue_map.setdefault(c, []).append(r['venueno'])
-        lab_map.setdefault(c, []).append(r['labname'])
 
-    # 90% rule
     for k in capacity:
         capacity[k] = int(capacity[k] * 0.9)
 
     # -------------------------------
     # SLOT CAPACITY
     # -------------------------------
-    ENG_DAYS = [1,2,3,4,5,6]
-    BPHARM_DAYS = [1,2]
-
     slot = {}
-    usage = {}
-
     for c, cap in capacity.items():
         slot[c] = {}
-        usage[c] = {}
 
-        for d in ENG_DAYS:
+        for d in [1,2,3,4,5,6]:
             slot[c][(d,"AFTERNOON","ENG")] = cap
-            usage[c][(d,"AFTERNOON")] = 0
 
-        for d in BPHARM_DAYS:
+        for d in [1,2]:
             slot[c][(d,"MORNING","BPHARM")] = cap
-            usage[c][(d,"MORNING")] = 0
 
     # -------------------------------
     # PREFERENCES
     # -------------------------------
     pref_map = {}
-
     for _, r in prefs.iterrows():
         pref = []
         for i in range(1,16):
@@ -115,53 +98,39 @@ if st.button("Run Allotment"):
     # ALLOTMENT
     # -------------------------------
     results = []
+    not_allotted = 0
 
     for _, cand in merged.iterrows():
 
         applno = cand['applno']
         name = cand['name']
-        district = cand.get('cdistrict', "")
 
-        if applno not in pref_map:
-            continue
+        pref_list = pref_map.get(applno, [])
+        pref_list = [str(x) for x in pref_list]
 
-        pref_list = pref_map[applno]
         pref_centre = pref_list[0] if pref_list else "-"
-
-        # district priority
-        pref_list = sorted(
-            pref_list,
-            key=lambda x: 0 if centre_district.get(str(x)) == district else 1
-        )
 
         allocated = False
 
         for centre in pref_list:
 
-            centre = str(centre)
-
             if centre not in slot:
                 continue
 
-            centre_name = centre_lookup.get(centre,"-")
+            centre_name = centre_lookup.get(centre, "-")
 
             # -------------------
-            # DUAL FIXED
+            # ENG + BPHARM
             # -------------------
             if cand['eng']=='Y' and cand['bpharm']=='Y':
 
-                # Try SAME DAY
-                for d in BPHARM_DAYS:
-                    k1 = (d,"MORNING","BPHARM")
-                    k2 = (d,"AFTERNOON","ENG")
+                # try same day
+                for d in [1,2]:
+                    if (slot[centre][(d,"MORNING","BPHARM")] > 0 and
+                        slot[centre][(d,"AFTERNOON","ENG")] > 0):
 
-                    if slot[centre][k1]>0 and slot[centre][k2]>0:
-
-                        slot[centre][k1]-=1
-                        slot[centre][k2]-=1
-
-                        v = venue_map[centre][0]
-                        l = lab_map[centre][0]
+                        slot[centre][(d,"MORNING","BPHARM")] -= 1
+                        slot[centre][(d,"AFTERNOON","ENG")] -= 1
 
                         results.append({
                             "ApplNo": applno,
@@ -169,12 +138,9 @@ if st.button("Run Allotment"):
                             "Preferred Centre": pref_centre,
                             "Allotted Centre": centre,
                             "CollegeCode": centre,
-                            "Centre Name": centre_name,
                             "Exam": "BPHARM",
                             "Day": d,
-                            "Session": "MORNING",
-                            "Venue": v,
-                            "Lab": l
+                            "Session": "MORNING"
                         })
 
                         results.append({
@@ -183,73 +149,63 @@ if st.button("Run Allotment"):
                             "Preferred Centre": pref_centre,
                             "Allotted Centre": centre,
                             "CollegeCode": centre,
-                            "Centre Name": centre_name,
                             "Exam": "ENG",
                             "Day": d,
-                            "Session": "AFTERNOON",
-                            "Venue": v,
-                            "Lab": l
+                            "Session": "AFTERNOON"
                         })
 
                         allocated = True
                         break
 
-                # If not possible → allocate separately
-                if not allocated:
+                if allocated:
+                    break
 
-                    # BPHARM
-                    for d in BPHARM_DAYS:
-                        k = (d,"MORNING","BPHARM")
-                        if slot[centre][k]>0:
-                            slot[centre][k]-=1
+                # fallback
+                for d in [1,2]:
+                    if slot[centre][(d,"MORNING","BPHARM")] > 0:
+                        slot[centre][(d,"MORNING","BPHARM")] -= 1
 
-                            results.append({
-                                "ApplNo": applno,
-                                "Name": name,
-                                "Preferred Centre": pref_centre,
-                                "Allotted Centre": centre,
-                                "CollegeCode": centre,
-                                "Centre Name": centre_name,
-                                "Exam": "BPHARM",
-                                "Day": d,
-                                "Session": "MORNING",
-                                "Venue": venue_map[centre][0],
-                                "Lab": lab_map[centre][0]
-                            })
-                            break
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Exam": "BPHARM",
+                            "Day": d,
+                            "Session": "MORNING"
+                        })
+                        allocated = True
+                        break
 
-                    # ENG
-                    for d in ENG_DAYS:
-                        k = (d,"AFTERNOON","ENG")
-                        if slot[centre][k]>0:
-                            slot[centre][k]-=1
+                for d in [1,2,3,4,5,6]:
+                    if slot[centre][(d,"AFTERNOON","ENG")] > 0:
+                        slot[centre][(d,"AFTERNOON","ENG")] -= 1
 
-                            results.append({
-                                "ApplNo": applno,
-                                "Name": name,
-                                "Preferred Centre": pref_centre,
-                                "Allotted Centre": centre,
-                                "CollegeCode": centre,
-                                "Centre Name": centre_name,
-                                "Exam": "ENG",
-                                "Day": d,
-                                "Session": "AFTERNOON",
-                                "Venue": venue_map[centre][0],
-                                "Lab": lab_map[centre][0]
-                            })
-                            break
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Exam": "ENG",
+                            "Day": d,
+                            "Session": "AFTERNOON"
+                        })
+                        allocated = True
+                        break
 
-                    allocated = True
+                if allocated:
+                    break
 
             # -------------------
             # ENG ONLY
             # -------------------
             elif cand['eng']=='Y':
 
-                for d in ENG_DAYS:
-                    k = (d,"AFTERNOON","ENG")
-                    if slot[centre][k]>0:
-                        slot[centre][k]-=1
+                for d in [1,2,3,4,5,6]:
+                    if slot[centre][(d,"AFTERNOON","ENG")] > 0:
+                        slot[centre][(d,"AFTERNOON","ENG")] -= 1
 
                         results.append({
                             "ApplNo": applno,
@@ -257,25 +213,25 @@ if st.button("Run Allotment"):
                             "Preferred Centre": pref_centre,
                             "Allotted Centre": centre,
                             "CollegeCode": centre,
-                            "Centre Name": centre_name,
                             "Exam": "ENG",
                             "Day": d,
-                            "Session": "AFTERNOON",
-                            "Venue": venue_map[centre][0],
-                            "Lab": lab_map[centre][0]
+                            "Session": "AFTERNOON"
                         })
+
                         allocated = True
                         break
+
+                if allocated:
+                    break
 
             # -------------------
             # BPHARM ONLY
             # -------------------
             else:
 
-                for d in BPHARM_DAYS:
-                    k = (d,"MORNING","BPHARM")
-                    if slot[centre][k]>0:
-                        slot[centre][k]-=1
+                for d in [1,2]:
+                    if slot[centre][(d,"MORNING","BPHARM")] > 0:
+                        slot[centre][(d,"MORNING","BPHARM")] -= 1
 
                         results.append({
                             "ApplNo": applno,
@@ -283,38 +239,35 @@ if st.button("Run Allotment"):
                             "Preferred Centre": pref_centre,
                             "Allotted Centre": centre,
                             "CollegeCode": centre,
-                            "Centre Name": centre_name,
                             "Exam": "BPHARM",
                             "Day": d,
-                            "Session": "MORNING",
-                            "Venue": venue_map[centre][0],
-                            "Lab": lab_map[centre][0]
+                            "Session": "MORNING"
                         })
+
                         allocated = True
                         break
 
-            if allocated:
-                break
+                if allocated:
+                    break
+
+        if not allocated:
+            not_allotted += 1
 
     df = pd.DataFrame(results)
 
     # -------------------------------
-    # OUTPUT
+    # OUTPUT + DEBUG
     # -------------------------------
-    st.success("✅ Allotment Completed")
+    st.success("✅ Completed")
+
+    st.write("Total Candidates:", len(merged))
+    st.write("Total Allocations (rows):", len(df))
+    st.write("Not Allotted:", not_allotted)
+
     st.dataframe(df, use_container_width=True)
 
-    st.subheader("📊 Centre Utilization")
-    st.write(df['Allotted Centre'].value_counts())
-
-    st.subheader("📅 Day-wise Load")
-    st.write(df['Day'].value_counts().sort_index())
-
-    st.subheader("🕒 Session Distribution")
-    st.write(df['Session'].value_counts())
-
     st.download_button(
-        "⬇ Download CSV",
+        "Download CSV",
         df.to_csv(index=False).encode(),
-        "centre_allotment.csv"
+        "allotment.csv"
     )
