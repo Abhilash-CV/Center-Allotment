@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🎯 Advanced Centre Allotment System")
+st.title("🎯 Centre Allotment System (Final Production Version)")
 
 # -------------------------------
 # FILE UPLOADS
@@ -14,13 +14,33 @@ cand_file = st.file_uploader("Candidates", type=["csv","xlsx"])
 reg_file = st.file_uploader("Registrations", type=["csv","xlsx"])
 
 
+# -------------------------------
+# SAFE LOAD
+# -------------------------------
 def load(file):
-    df = pd.read_csv(file) if file.name.endswith("csv") else pd.read_excel(file)
+    if file is None:
+        st.error("❌ Missing file")
+        st.stop()
+
+    name = file.name.lower()
+
+    if name.endswith(".csv"):
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file)
+
     df.columns = df.columns.str.strip().str.lower()
     return df
 
 
+# -------------------------------
+# MAIN
+# -------------------------------
 if st.button("Run Allotment"):
+
+    if not all([lab_file, centre_file, pref_file, cand_file, reg_file]):
+        st.error("⚠️ Upload all files")
+        st.stop()
 
     labs = load(lab_file)
     centres = load(centre_file)
@@ -29,7 +49,13 @@ if st.button("Run Allotment"):
     reg = load(reg_file)
 
     # -------------------------------
-    # JOIN + FILTER
+    # NORMALIZE TYPES (CRITICAL)
+    # -------------------------------
+    labs['collegecode'] = labs['collegecode'].astype(str)
+    centres['centrecode'] = centres['centrecode'].astype(str)
+
+    # -------------------------------
+    # FILTER
     # -------------------------------
     valid = reg[reg['paymentmode'].isin(['O','F'])]
 
@@ -38,9 +64,10 @@ if st.button("Run Allotment"):
     merged = merged.sort_values("applno")
 
     # -------------------------------
-    # CENTRE LOOKUP
+    # LOOKUPS
     # -------------------------------
     centre_lookup = dict(zip(centres['centrecode'], centres['centrename']))
+    centre_district = dict(zip(centres['centrecode'], centres['centredistrict']))
 
     # -------------------------------
     # CAPACITY
@@ -50,7 +77,8 @@ if st.button("Run Allotment"):
     lab_map = {}
 
     for _, r in labs.iterrows():
-        c = r['collegecode']
+        c = str(r['collegecode'])
+
         capacity[c] = capacity.get(c,0) + int(r['noofsys'])
         venue_map.setdefault(c, []).append(r['venueno'])
         lab_map.setdefault(c, []).append(r['labname'])
@@ -84,12 +112,14 @@ if st.button("Run Allotment"):
     # PREFERENCES
     # -------------------------------
     pref_map = {}
+
     for _, r in prefs.iterrows():
         pref = []
         for i in range(1,16):
             col = f'centre{i}'
             if col in r and pd.notna(r[col]):
-                pref.append(r[col])
+                pref.append(str(r[col]))
+
         pref_map[r['applno']] = pref
 
     # -------------------------------
@@ -101,29 +131,37 @@ if st.button("Run Allotment"):
 
         applno = cand['applno']
         name = cand['name']
-
-        # district priority
-        district = cand.get('cdistrict', None)
+        district = cand.get('cdistrict', "")
 
         if applno not in pref_map:
             continue
 
         pref_list = pref_map[applno]
 
-        # sort centres by same district first
-        pref_list = sorted(pref_list, key=lambda x: 0 if str(x)==str(district) else 1)
+        pref_centre = pref_list[0] if len(pref_list)>0 else "-"
+
+        # district priority
+        pref_list = sorted(
+            pref_list,
+            key=lambda x: 0 if centre_district.get(str(x)) == district else 1
+        )
+
+        allocated = False
 
         for centre in pref_list:
+
+            centre = str(centre)
 
             if centre not in slot:
                 continue
 
-            # ---------------------
-            # DUAL EXAM
-            # ---------------------
+            centre_name = centre_lookup.get(centre,"-")
+
+            # -------------------
+            # DUAL
+            # -------------------
             if cand['eng']=='Y' and cand['bpharm']=='Y':
 
-                # pick least loaded day
                 days_sorted = sorted(BPHARM_DAYS, key=lambda d: usage[centre][(d,"MORNING")])
 
                 for d in days_sorted:
@@ -142,14 +180,42 @@ if st.button("Run Allotment"):
                         v = venue_map[centre][0]
                         l = lab_map[centre][0]
 
-                        results.append([applno,name,"BPHARM",d,"MORNING",centre,v,l])
-                        results.append([applno,name,"ENG",d,"AFTERNOON",centre,v,l])
-                        break
-                break
+                        # BPHARM
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Centre Name": centre_name,
+                            "Exam": "BPHARM",
+                            "Day": d,
+                            "Session": "MORNING",
+                            "Venue": v,
+                            "Lab": l
+                        })
 
-            # ---------------------
+                        # ENG
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Centre Name": centre_name,
+                            "Exam": "ENG",
+                            "Day": d,
+                            "Session": "AFTERNOON",
+                            "Venue": v,
+                            "Lab": l
+                        })
+
+                        allocated = True
+                        break
+
+            # -------------------
             # ENG ONLY
-            # ---------------------
+            # -------------------
             elif cand['eng']=='Y':
 
                 days_sorted = sorted(ENG_DAYS, key=lambda d: usage[centre][(d,"AFTERNOON")])
@@ -158,19 +224,33 @@ if st.button("Run Allotment"):
                     k = (d,"AFTERNOON","ENG")
 
                     if slot[centre][k]>0:
+
                         slot[centre][k]-=1
                         usage[centre][(d,"AFTERNOON")]+=1
 
                         v = venue_map[centre][0]
                         l = lab_map[centre][0]
 
-                        results.append([applno,name,"ENG",d,"AFTERNOON",centre,v,l])
-                        break
-                break
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Centre Name": centre_name,
+                            "Exam": "ENG",
+                            "Day": d,
+                            "Session": "AFTERNOON",
+                            "Venue": v,
+                            "Lab": l
+                        })
 
-            # ---------------------
+                        allocated = True
+                        break
+
+            # -------------------
             # BPHARM ONLY
-            # ---------------------
+            # -------------------
             else:
 
                 days_sorted = sorted(BPHARM_DAYS, key=lambda d: usage[centre][(d,"MORNING")])
@@ -179,29 +259,46 @@ if st.button("Run Allotment"):
                     k = (d,"MORNING","BPHARM")
 
                     if slot[centre][k]>0:
+
                         slot[centre][k]-=1
                         usage[centre][(d,"MORNING")]+=1
 
                         v = venue_map[centre][0]
                         l = lab_map[centre][0]
 
-                        results.append([applno,name,"BPHARM",d,"MORNING",centre,v,l])
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Centre Name": centre_name,
+                            "Exam": "BPHARM",
+                            "Day": d,
+                            "Session": "MORNING",
+                            "Venue": v,
+                            "Lab": l
+                        })
+
+                        allocated = True
                         break
+
+            if allocated:
                 break
 
-    df = pd.DataFrame(results, columns=[
-        "ApplNo","Name","Exam","Day","Session","Centre","Venue","Lab"
-    ])
+    df = pd.DataFrame(results)
 
-    st.success("✅ Completed")
-
+    # -------------------------------
+    # OUTPUT
+    # -------------------------------
+    st.success("✅ Allotment Completed")
     st.dataframe(df, use_container_width=True)
 
     # -------------------------------
     # DASHBOARD
     # -------------------------------
     st.subheader("📊 Centre Utilization")
-    st.write(df['Centre'].value_counts())
+    st.write(df['Allotted Centre'].value_counts())
 
     st.subheader("📅 Day-wise Load")
     st.write(df['Day'].value_counts().sort_index())
@@ -209,9 +306,11 @@ if st.button("Run Allotment"):
     st.subheader("🕒 Session Distribution")
     st.write(df['Session'].value_counts())
 
-    # download
+    # -------------------------------
+    # DOWNLOAD
+    # -------------------------------
     st.download_button(
-        "Download CSV",
+        "⬇ Download CSV",
         df.to_csv(index=False).encode(),
-        "allotment.csv"
+        "centre_allotment.csv"
     )
