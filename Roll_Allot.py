@@ -2,249 +2,216 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🎯 Centre Allotment System (Day + Session Based)")
+st.title("🎯 Advanced Centre Allotment System")
 
 # -------------------------------
 # FILE UPLOADS
 # -------------------------------
-lab_file = st.file_uploader("Upload Lab Details", type=["csv", "xlsx"])
-centre_file = st.file_uploader("Upload Centre Details", type=["csv", "xlsx"])
-pref_file = st.file_uploader("Upload Preferences", type=["csv", "xlsx"])
-cand_file = st.file_uploader("Upload Candidates", type=["csv", "xlsx"])
-reg_file = st.file_uploader("Upload Registrations", type=["csv", "xlsx"])
+lab_file = st.file_uploader("Lab Details", type=["csv","xlsx"])
+centre_file = st.file_uploader("Centre Details", type=["csv","xlsx"])
+pref_file = st.file_uploader("Preferences", type=["csv","xlsx"])
+cand_file = st.file_uploader("Candidates", type=["csv","xlsx"])
+reg_file = st.file_uploader("Registrations", type=["csv","xlsx"])
 
 
-# -------------------------------
-# LOAD FILE
-# -------------------------------
-def load_file(file):
-    if file.name.endswith(".csv"):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
-
+def load(file):
+    df = pd.read_csv(file) if file.name.endswith("csv") else pd.read_excel(file)
     df.columns = df.columns.str.strip().str.lower()
     return df
 
 
-# -------------------------------
-# VALIDATION
-# -------------------------------
-def validate_columns(df, required_cols, name):
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        st.error(f"❌ Missing columns in {name}: {missing}")
-        st.write("Available:", df.columns.tolist())
-        st.stop()
-
-
-# -------------------------------
-# MAIN
-# -------------------------------
 if st.button("Run Allotment"):
 
-    if not all([lab_file, centre_file, pref_file, cand_file, reg_file]):
-        st.error("⚠️ Upload all files")
-        st.stop()
+    labs = load(lab_file)
+    centres = load(centre_file)
+    prefs = load(pref_file)
+    candidates = load(cand_file)
+    reg = load(reg_file)
 
-    with st.spinner("Processing..."):
+    # -------------------------------
+    # JOIN + FILTER
+    # -------------------------------
+    valid = reg[reg['paymentmode'].isin(['O','F'])]
 
-        labs = load_file(lab_file)
-        centres = load_file(centre_file)
-        prefs = load_file(pref_file)
-        candidates = load_file(cand_file)
-        registrations = load_file(reg_file)
+    merged = candidates.merge(valid, on="applno", suffixes=('','_r'))
+    merged = merged[(merged['eng']=='Y') | (merged['bpharm']=='Y')]
+    merged = merged.sort_values("applno")
 
-        # -------------------------------
-        # VALIDATION
-        # -------------------------------
-        validate_columns(labs, ['collegecode', 'venueno', 'labname', 'noofsys'], "Lab")
-        validate_columns(centres, ['centrecode', 'centrename'], "Centre")
-        validate_columns(prefs, ['applno'], "Prefs")
-        validate_columns(candidates, ['applno', 'name', 'eng', 'bpharm'], "Candidates")
-        validate_columns(registrations, ['applno', 'paymentmode'], "Registrations")
+    # -------------------------------
+    # CENTRE LOOKUP
+    # -------------------------------
+    centre_lookup = dict(zip(centres['centrecode'], centres['centrename']))
 
-        # -------------------------------
-        # CENTRE LOOKUP
-        # -------------------------------
-        centre_lookup = dict(zip(centres['centrecode'], centres['centrename']))
+    # -------------------------------
+    # CAPACITY
+    # -------------------------------
+    capacity = {}
+    venue_map = {}
+    lab_map = {}
 
-        # -------------------------------
-        # CAPACITY
-        # -------------------------------
-        capacity = {}
-        centre_name = {}
-        venue_map = {}
-        lab_map = {}
+    for _, r in labs.iterrows():
+        c = r['collegecode']
+        capacity[c] = capacity.get(c,0) + int(r['noofsys'])
+        venue_map.setdefault(c, []).append(r['venueno'])
+        lab_map.setdefault(c, []).append(r['labname'])
 
-        for _, row in labs.iterrows():
-            code = row['collegecode']
+    # 90% rule
+    for k in capacity:
+        capacity[k] = int(capacity[k]*0.9)
 
-            capacity[code] = capacity.get(code, 0) + int(row['noofsys'])
-            centre_name[code] = centre_lookup.get(code, f"UNKNOWN-{code}")
+    # -------------------------------
+    # SLOT CAPACITY
+    # -------------------------------
+    ENG_DAYS = [1,2,3,4,5,6]
+    BPHARM_DAYS = [1,2]
 
-            venue_map.setdefault(code, []).append(row['venueno'])
-            lab_map.setdefault(code, []).append(row['labname'])
+    slot = {}
+    usage = {}
 
-        # 10% buffer
-        for k in capacity:
-            capacity[k] = int(capacity[k] * 0.90)
+    for c, cap in capacity.items():
+        slot[c] = {}
+        usage[c] = {}
 
-        # -------------------------------
-        # SLOT CAPACITY (NEW)
-        # -------------------------------
-        ENG_DAYS = [1, 2, 3, 4, 5, 6]
-        BPHARM_DAYS = [1, 2]
+        for d in ENG_DAYS:
+            slot[c][(d,"AFTERNOON","ENG")] = cap
+            usage[c][(d,"AFTERNOON")] = 0
 
-        slot_capacity = {}
+        for d in BPHARM_DAYS:
+            slot[c][(d,"MORNING","BPHARM")] = cap
+            usage[c][(d,"MORNING")] = 0
 
-        for centre, cap in capacity.items():
-            slot_capacity[centre] = {}
+    # -------------------------------
+    # PREFERENCES
+    # -------------------------------
+    pref_map = {}
+    for _, r in prefs.iterrows():
+        pref = []
+        for i in range(1,16):
+            col = f'centre{i}'
+            if col in r and pd.notna(r[col]):
+                pref.append(r[col])
+        pref_map[r['applno']] = pref
 
-            # ENG → 6 days afternoon
-            for d in ENG_DAYS:
-                slot_capacity[centre][(d, "AFTERNOON", "ENG")] = cap
+    # -------------------------------
+    # ALLOTMENT
+    # -------------------------------
+    results = []
 
-            # BPHARM → 2 days morning
-            for d in BPHARM_DAYS:
-                slot_capacity[centre][(d, "MORNING", "BPHARM")] = cap
+    for _, cand in merged.iterrows():
 
-        # -------------------------------
-        # PREFERENCES
-        # -------------------------------
-        pref_map = {}
+        applno = cand['applno']
+        name = cand['name']
 
-        for _, row in prefs.iterrows():
-            pref = []
-            for i in range(1, 16):
-                col = f'centre{i}'
-                if col in row and pd.notna(row[col]):
-                    pref.append(row[col])
-            pref_map[row['applno']] = pref
+        # district priority
+        district = cand.get('cdistrict', None)
 
-        # -------------------------------
-        # FILTER
-        # -------------------------------
-        valid_reg = registrations[
-            registrations['paymentmode'].isin(['O', 'F'])
-        ]
+        if applno not in pref_map:
+            continue
 
-        merged = candidates.merge(
-            valid_reg,
-            on="applno",
-            suffixes=('', '_reg')
-        )
+        pref_list = pref_map[applno]
 
-        merged = merged[
-            (merged['eng'] == 'Y') | (merged['bpharm'] == 'Y')
-        ]
+        # sort centres by same district first
+        pref_list = sorted(pref_list, key=lambda x: 0 if str(x)==str(district) else 1)
 
-        merged = merged.sort_values("applno")
+        for centre in pref_list:
 
-        # -------------------------------
-        # ALLOTMENT
-        # -------------------------------
-        results = []
+            if centre not in slot:
+                continue
 
-        for _, cand in merged.iterrows():
+            # ---------------------
+            # DUAL EXAM
+            # ---------------------
+            if cand['eng']=='Y' and cand['bpharm']=='Y':
 
-            applno = cand['applno']
+                # pick least loaded day
+                days_sorted = sorted(BPHARM_DAYS, key=lambda d: usage[centre][(d,"MORNING")])
 
-            pref_centre = "-"
-            allotted = "NOT ALLOTTED"
-            allotted_name = "-"
-            venue = "-"
-            lab = "-"
-            day = "-"
-            session = "-"
+                for d in days_sorted:
 
-            # exam type
-            if cand['eng'] == 'Y' and cand['bpharm'] == 'Y':
-                exam_types = ["ENG", "BPHARM"]
-            elif cand['eng'] == 'Y':
-                exam_types = ["ENG"]
-            else:
-                exam_types = ["BPHARM"]
+                    k1 = (d,"MORNING","BPHARM")
+                    k2 = (d,"AFTERNOON","ENG")
 
-            if applno in pref_map:
+                    if slot[centre][k1]>0 and slot[centre][k2]>0:
 
-                pref_list = pref_map[applno]
+                        slot[centre][k1]-=1
+                        slot[centre][k2]-=1
 
-                if len(pref_list) > 0:
-                    pref_centre = pref_list[0]
+                        usage[centre][(d,"MORNING")]+=1
+                        usage[centre][(d,"AFTERNOON")]+=1
 
-                for centre in pref_list:
+                        v = venue_map[centre][0]
+                        l = lab_map[centre][0]
 
-                    if centre not in slot_capacity:
-                        continue
-
-                    allocated = False
-
-                    for exam in exam_types:
-
-                        if exam == "ENG":
-                            days = ENG_DAYS
-                            session_type = "AFTERNOON"
-                        else:
-                            days = BPHARM_DAYS
-                            session_type = "MORNING"
-
-                        for d in days:
-
-                            key = (d, session_type, exam)
-
-                            if slot_capacity[centre].get(key, 0) > 0:
-
-                                allotted = centre
-                                allotted_name = centre_name.get(centre, "-")
-
-                                venue = venue_map.get(centre, ["-"])[0]
-                                lab = lab_map.get(centre, ["-"])[0]
-
-                                day = d
-                                session = session_type
-
-                                slot_capacity[centre][key] -= 1
-                                allocated = True
-                                break
-
-                        if allocated:
-                            break
-
-                    if allocated:
+                        results.append([applno,name,"BPHARM",d,"MORNING",centre,v,l])
+                        results.append([applno,name,"ENG",d,"AFTERNOON",centre,v,l])
                         break
+                break
 
-            results.append({
-                "ApplNo": applno,
-                "Name": cand['name'],
-                "Exam": "+".join(exam_types),
-                "Pref": pref_centre,
-                "Allotted": allotted,
-                "Centre Name": allotted_name,
-                "Venue": venue,
-                "Lab": lab,
-                "Day": day,
-                "Session": session
-            })
+            # ---------------------
+            # ENG ONLY
+            # ---------------------
+            elif cand['eng']=='Y':
 
-        df = pd.DataFrame(results)
+                days_sorted = sorted(ENG_DAYS, key=lambda d: usage[centre][(d,"AFTERNOON")])
 
-    # -------------------------------
-    # OUTPUT
-    # -------------------------------
-    st.success("✅ Allotment Completed")
+                for d in days_sorted:
+                    k = (d,"AFTERNOON","ENG")
+
+                    if slot[centre][k]>0:
+                        slot[centre][k]-=1
+                        usage[centre][(d,"AFTERNOON")]+=1
+
+                        v = venue_map[centre][0]
+                        l = lab_map[centre][0]
+
+                        results.append([applno,name,"ENG",d,"AFTERNOON",centre,v,l])
+                        break
+                break
+
+            # ---------------------
+            # BPHARM ONLY
+            # ---------------------
+            else:
+
+                days_sorted = sorted(BPHARM_DAYS, key=lambda d: usage[centre][(d,"MORNING")])
+
+                for d in days_sorted:
+                    k = (d,"MORNING","BPHARM")
+
+                    if slot[centre][k]>0:
+                        slot[centre][k]-=1
+                        usage[centre][(d,"MORNING")]+=1
+
+                        v = venue_map[centre][0]
+                        l = lab_map[centre][0]
+
+                        results.append([applno,name,"BPHARM",d,"MORNING",centre,v,l])
+                        break
+                break
+
+    df = pd.DataFrame(results, columns=[
+        "ApplNo","Name","Exam","Day","Session","Centre","Venue","Lab"
+    ])
+
+    st.success("✅ Completed")
 
     st.dataframe(df, use_container_width=True)
 
-    st.subheader("📊 Summary")
-    st.write(df['Allotted'].value_counts())
+    # -------------------------------
+    # DASHBOARD
+    # -------------------------------
+    st.subheader("📊 Centre Utilization")
+    st.write(df['Centre'].value_counts())
 
-    # Download
-    csv = df.to_csv(index=False).encode('utf-8')
+    st.subheader("📅 Day-wise Load")
+    st.write(df['Day'].value_counts().sort_index())
 
+    st.subheader("🕒 Session Distribution")
+    st.write(df['Session'].value_counts())
+
+    # download
     st.download_button(
-        "⬇ Download Result CSV",
-        csv,
-        "centre_allotment.csv",
-        "text/csv"
+        "Download CSV",
+        df.to_csv(index=False).encode(),
+        "allotment.csv"
     )
