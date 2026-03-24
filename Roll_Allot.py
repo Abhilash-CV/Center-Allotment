@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🎯 Centre Allotment System (CSV / Excel)")
+st.title("🎯 Centre Allotment System (Day + Session Based)")
 
 # -------------------------------
 # FILE UPLOADS
@@ -23,7 +23,6 @@ def load_file(file):
     else:
         df = pd.read_excel(file)
 
-    # Normalize column names
     df.columns = df.columns.str.strip().str.lower()
     return df
 
@@ -40,17 +39,16 @@ def validate_columns(df, required_cols, name):
 
 
 # -------------------------------
-# MAIN PROCESS
+# MAIN
 # -------------------------------
 if st.button("Run Allotment"):
 
     if not all([lab_file, centre_file, pref_file, cand_file, reg_file]):
-        st.error("⚠️ Please upload all required files")
+        st.error("⚠️ Upload all files")
         st.stop()
 
     with st.spinner("Processing..."):
 
-        # Load all files
         labs = load_file(lab_file)
         centres = load_file(centre_file)
         prefs = load_file(pref_file)
@@ -58,34 +56,21 @@ if st.button("Run Allotment"):
         registrations = load_file(reg_file)
 
         # -------------------------------
-        # DEBUG VIEW
-        # -------------------------------
-        with st.expander("🔍 Debug Columns"):
-            st.write("Lab:", labs.columns.tolist())
-            st.write("Centre:", centres.columns.tolist())
-            st.write("Prefs:", prefs.columns.tolist())
-            st.write("Candidates:", candidates.columns.tolist())
-            st.write("Registrations:", registrations.columns.tolist())
-
-        # -------------------------------
-        # VALIDATE STRUCTURE
+        # VALIDATION
         # -------------------------------
         validate_columns(labs, ['collegecode', 'venueno', 'labname', 'noofsys'], "Lab")
         validate_columns(centres, ['centrecode', 'centrename'], "Centre")
-        validate_columns(prefs, ['applno'], "Preferences")
+        validate_columns(prefs, ['applno'], "Prefs")
         validate_columns(candidates, ['applno', 'name', 'eng', 'bpharm'], "Candidates")
         validate_columns(registrations, ['applno', 'paymentmode'], "Registrations")
 
         # -------------------------------
-        # CENTRE LOOKUP (JOIN)
+        # CENTRE LOOKUP
         # -------------------------------
-        centre_lookup = dict(zip(
-            centres['centrecode'],
-            centres['centrename']
-        ))
+        centre_lookup = dict(zip(centres['centrecode'], centres['centrename']))
 
         # -------------------------------
-        # CAPACITY BUILD
+        # CAPACITY
         # -------------------------------
         capacity = {}
         centre_name = {}
@@ -101,12 +86,31 @@ if st.button("Run Allotment"):
             venue_map.setdefault(code, []).append(row['venueno'])
             lab_map.setdefault(code, []).append(row['labname'])
 
-        # Apply 10% buffer
+        # 10% buffer
         for k in capacity:
             capacity[k] = int(capacity[k] * 0.90)
 
         # -------------------------------
-        # PREFERENCE MAP
+        # SLOT CAPACITY (NEW)
+        # -------------------------------
+        ENG_DAYS = [1, 2, 3, 4, 5, 6]
+        BPHARM_DAYS = [1, 2]
+
+        slot_capacity = {}
+
+        for centre, cap in capacity.items():
+            slot_capacity[centre] = {}
+
+            # ENG → 6 days afternoon
+            for d in ENG_DAYS:
+                slot_capacity[centre][(d, "AFTERNOON", "ENG")] = cap
+
+            # BPHARM → 2 days morning
+            for d in BPHARM_DAYS:
+                slot_capacity[centre][(d, "MORNING", "BPHARM")] = cap
+
+        # -------------------------------
+        # PREFERENCES
         # -------------------------------
         pref_map = {}
 
@@ -116,17 +120,15 @@ if st.button("Run Allotment"):
                 col = f'centre{i}'
                 if col in row and pd.notna(row[col]):
                     pref.append(row[col])
-
             pref_map[row['applno']] = pref
 
         # -------------------------------
-        # FILTER VALID CANDIDATES
+        # FILTER
         # -------------------------------
         valid_reg = registrations[
             registrations['paymentmode'].isin(['O', 'F'])
         ]
 
-        # ✅ FIXED MERGE (NO name_x issue)
         merged = candidates.merge(
             valid_reg,
             on="applno",
@@ -153,42 +155,76 @@ if st.button("Run Allotment"):
             allotted_name = "-"
             venue = "-"
             lab = "-"
+            day = "-"
+            session = "-"
+
+            # exam type
+            if cand['eng'] == 'Y' and cand['bpharm'] == 'Y':
+                exam_types = ["ENG", "BPHARM"]
+            elif cand['eng'] == 'Y':
+                exam_types = ["ENG"]
+            else:
+                exam_types = ["BPHARM"]
 
             if applno in pref_map:
+
                 pref_list = pref_map[applno]
 
                 if len(pref_list) > 0:
                     pref_centre = pref_list[0]
 
                 for centre in pref_list:
-                    if centre in capacity and capacity[centre] > 0:
 
-                        allotted = centre
-                        allotted_name = centre_name.get(centre, "-")
+                    if centre not in slot_capacity:
+                        continue
 
-                        venue = venue_map.get(centre, ["-"])[0]
-                        lab = lab_map.get(centre, ["-"])[0]
+                    allocated = False
 
-                        capacity[centre] -= 1
+                    for exam in exam_types:
+
+                        if exam == "ENG":
+                            days = ENG_DAYS
+                            session_type = "AFTERNOON"
+                        else:
+                            days = BPHARM_DAYS
+                            session_type = "MORNING"
+
+                        for d in days:
+
+                            key = (d, session_type, exam)
+
+                            if slot_capacity[centre].get(key, 0) > 0:
+
+                                allotted = centre
+                                allotted_name = centre_name.get(centre, "-")
+
+                                venue = venue_map.get(centre, ["-"])[0]
+                                lab = lab_map.get(centre, ["-"])[0]
+
+                                day = d
+                                session = session_type
+
+                                slot_capacity[centre][key] -= 1
+                                allocated = True
+                                break
+
+                        if allocated:
+                            break
+
+                    if allocated:
                         break
-
-            # Exam type
-            if cand['eng'] == 'Y' and cand['bpharm'] == 'Y':
-                exam = "ENG+BPHARM"
-            elif cand['eng'] == 'Y':
-                exam = "ENG"
-            else:
-                exam = "BPHARM"
 
             results.append({
                 "ApplNo": applno,
-                "Name": cand['name'],   # ✅ now safe
-                "Exam": exam,
+                "Name": cand['name'],
+                "Exam": "+".join(exam_types),
                 "Pref": pref_centre,
                 "Allotted": allotted,
                 "Centre Name": allotted_name,
                 "Venue": venue,
-                "Lab": lab
+                "Lab": lab,
+                "Day": day,
+                "Session": session
             })
 
         df = pd.DataFrame(results)
@@ -200,15 +236,10 @@ if st.button("Run Allotment"):
 
     st.dataframe(df, use_container_width=True)
 
-    # -------------------------------
-    # SUMMARY
-    # -------------------------------
     st.subheader("📊 Summary")
     st.write(df['Allotted'].value_counts())
 
-    # -------------------------------
-    # DOWNLOAD
-    # -------------------------------
+    # Download
     csv = df.to_csv(index=False).encode('utf-8')
 
     st.download_button(
