@@ -2,9 +2,11 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🎯 Centre Allotment System (Final Fix)")
+st.title("🎯 Centre Allotment System (Final Stable Version)")
 
-# Uploads
+# -------------------------------
+# FILE UPLOADS
+# -------------------------------
 lab_file = st.file_uploader("Lab Details", type=["csv","xlsx"])
 centre_file = st.file_uploader("Centre Details", type=["csv","xlsx"])
 pref_file = st.file_uploader("Preferences", type=["csv","xlsx"])
@@ -12,50 +14,88 @@ cand_file = st.file_uploader("Candidates", type=["csv","xlsx"])
 reg_file = st.file_uploader("Registrations", type=["csv","xlsx"])
 
 
+# -------------------------------
+# LOAD FUNCTION
+# -------------------------------
 def load(file):
+    if file is None:
+        st.error("❌ Missing file")
+        st.stop()
+
     df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
     df.columns = df.columns.str.strip().str.lower()
     return df
 
 
+# -------------------------------
+# RUN
+# -------------------------------
 if st.button("Run Allotment"):
+
+    if not all([lab_file, centre_file, pref_file, cand_file, reg_file]):
+        st.error("⚠️ Upload all files")
+        st.stop()
 
     labs = load(lab_file)
     prefs = load(pref_file)
     candidates = load(cand_file)
     reg = load(reg_file)
 
-    # Normalize
+    # -------------------------------
+    # NORMALIZE
+    # -------------------------------
     labs['collegecode'] = labs['collegecode'].astype(str)
 
-    # Filter
+    # -------------------------------
+    # FILTER VALID CANDIDATES
+    # -------------------------------
     valid = reg[reg['paymentmode'].isin(['O','F'])]
-    merged = candidates.merge(valid, on="applno")
-    merged = merged[(merged['eng']=='Y') | (merged['bpharm']=='Y')]
 
-    # Capacity
+    # ✅ FIXED MERGE (NO name_x issue)
+    merged = candidates.merge(
+        valid,
+        on="applno",
+        suffixes=('', '_reg')
+    )
+
+    merged = merged[
+        (merged['eng']=='Y') | (merged['bpharm']=='Y')
+    ]
+
+    merged = merged.sort_values("applno")
+
+    # -------------------------------
+    # BUILD CAPACITY
+    # -------------------------------
     capacity = {}
 
     for _, r in labs.iterrows():
         c = str(r['collegecode'])
-        capacity[c] = capacity.get(c,0) + int(r['noofsys'])
+        capacity[c] = capacity.get(c, 0) + int(r['noofsys'])
 
+    # Apply 10% buffer
     for k in capacity:
         capacity[k] = int(capacity[k] * 0.9)
 
-    # Slot
+    # -------------------------------
+    # SLOT CAPACITY
+    # -------------------------------
     slot = {}
 
     for c, cap in capacity.items():
         slot[c] = {}
 
+        # ENG → 6 days afternoon
         for d in range(1,7):
             slot[c][(d,"AFTERNOON","ENG")] = cap
 
+        # BPHARM → 2 days morning
         for d in [1,2]:
             slot[c][(d,"MORNING","BPHARM")] = cap
 
-    # Preferences
+    # -------------------------------
+    # PREFERENCE MAP
+    # -------------------------------
     pref_map = {}
 
     for _, r in prefs.iterrows():
@@ -67,7 +107,7 @@ if st.button("Run Allotment"):
         pref_map[r['applno']] = pref
 
     # -------------------------------
-    # ALLOTMENT (FINAL FIX)
+    # ALLOTMENT
     # -------------------------------
     results = []
     not_allotted = 0
@@ -75,7 +115,7 @@ if st.button("Run Allotment"):
     for _, cand in merged.iterrows():
 
         applno = cand['applno']
-        name = cand['name']
+        name = cand['name']   # ✅ FIXED
 
         pref_list = pref_map.get(applno, [])
         pref_centre = pref_list[0] if pref_list else "-"
@@ -160,17 +200,19 @@ if st.button("Run Allotment"):
 
     df = pd.DataFrame(results)
 
-    # Output
-    st.success("✅ Completed")
+    # -------------------------------
+    # OUTPUT
+    # -------------------------------
+    st.success("✅ Allotment Completed")
 
     st.write("Total Candidates:", len(merged))
     st.write("Allocated Rows:", len(df))
     st.write("Not Allotted:", not_allotted)
 
-    st.dataframe(df)
+    st.dataframe(df, use_container_width=True)
 
     st.download_button(
-        "Download CSV",
+        "⬇ Download CSV",
         df.to_csv(index=False).encode(),
-        "allotment.csv"
+        "centre_allotment.csv"
     )
