@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("🎯 Centre Allotment System (Correct Mapping Fixed)")
+st.title("🎯 Centre Allotment System (Final Fix)")
 
-# -------------------------------
-# FILES
-# -------------------------------
+# Uploads
 lab_file = st.file_uploader("Lab Details", type=["csv","xlsx"])
 centre_file = st.file_uploader("Centre Details", type=["csv","xlsx"])
 pref_file = st.file_uploader("Preferences", type=["csv","xlsx"])
@@ -23,90 +21,41 @@ def load(file):
 if st.button("Run Allotment"):
 
     labs = load(lab_file)
-    centres = load(centre_file)
     prefs = load(pref_file)
     candidates = load(cand_file)
     reg = load(reg_file)
 
-    # -------------------------------
-    # NORMALIZE
-    # -------------------------------
+    # Normalize
     labs['collegecode'] = labs['collegecode'].astype(str)
-    centres['centrecode'] = centres['centrecode'].astype(str)
 
-    # -------------------------------
-    # 🔥 BUILD CENTRE → COLLEGE MAP
-    # -------------------------------
+    # Filter
+    valid = reg[reg['paymentmode'].isin(['O','F'])]
+    merged = candidates.merge(valid, on="applno")
+    merged = merged[(merged['eng']=='Y') | (merged['bpharm']=='Y')]
 
-    centre_to_colleges = {}
-
-    # CASE 1: if lab has centrecode
-    if 'centrecode' in labs.columns:
-
-        for _, r in labs.iterrows():
-            centre = str(r['centrecode'])
-            college = str(r['collegecode'])
-
-            centre_to_colleges.setdefault(centre, []).append(college)
-
-    else:
-        # CASE 2: fallback via district
-        st.warning("⚠️ centrecode not in lab → using district mapping")
-
-        # centre → district
-        centre_district = dict(zip(
-            centres['centrecode'],
-            centres['centredistrict']
-        ))
-
-        # lab must have district
-        if 'district' not in labs.columns and 'centredistrict' not in labs.columns:
-            st.error("❌ Cannot map centre → college. Need centrecode or district.")
-            st.stop()
-
-        lab_district_col = 'district' if 'district' in labs.columns else 'centredistrict'
-
-        for _, c_row in centres.iterrows():
-            centre = str(c_row['centrecode'])
-            c_dist = c_row['centredistrict']
-
-            matched_colleges = labs[
-                labs[lab_district_col] == c_dist
-            ]['collegecode'].astype(str).tolist()
-
-            centre_to_colleges[centre] = matched_colleges
-
-    st.write("Sample mapping:", list(centre_to_colleges.items())[:3])
-
-    # -------------------------------
-    # CAPACITY (per college)
-    # -------------------------------
+    # Capacity
     capacity = {}
 
     for _, r in labs.iterrows():
-        college = str(r['collegecode'])
-        capacity[college] = capacity.get(college, 0) + int(r['noofsys'])
+        c = str(r['collegecode'])
+        capacity[c] = capacity.get(c,0) + int(r['noofsys'])
 
     for k in capacity:
         capacity[k] = int(capacity[k] * 0.9)
 
-    # -------------------------------
-    # SLOT
-    # -------------------------------
+    # Slot
     slot = {}
 
-    for college, cap in capacity.items():
-        slot[college] = {}
+    for c, cap in capacity.items():
+        slot[c] = {}
 
         for d in range(1,7):
-            slot[college][(d,"AFTERNOON","ENG")] = cap
+            slot[c][(d,"AFTERNOON","ENG")] = cap
 
         for d in [1,2]:
-            slot[college][(d,"MORNING","BPHARM")] = cap
+            slot[c][(d,"MORNING","BPHARM")] = cap
 
-    # -------------------------------
-    # PREF MAP
-    # -------------------------------
+    # Preferences
     pref_map = {}
 
     for _, r in prefs.iterrows():
@@ -118,15 +67,7 @@ if st.button("Run Allotment"):
         pref_map[r['applno']] = pref
 
     # -------------------------------
-    # FILTER
-    # -------------------------------
-    valid = reg[reg['paymentmode'].isin(['O','F'])]
-
-    merged = candidates.merge(valid, on="applno")
-    merged = merged[(merged['eng']=='Y') | (merged['bpharm']=='Y')]
-
-    # -------------------------------
-    # ALLOTMENT
+    # ALLOTMENT (FINAL FIX)
     # -------------------------------
     results = []
     not_allotted = 0
@@ -139,75 +80,87 @@ if st.button("Run Allotment"):
         pref_list = pref_map.get(applno, [])
         pref_centre = pref_list[0] if pref_list else "-"
 
-        allocated = False
+        allocated_any = False
 
-        for centre in pref_list:
+        # -------------------
+        # BPHARM FIRST
+        # -------------------
+        if cand['bpharm'] == 'Y':
 
-            colleges = centre_to_colleges.get(centre, [])
+            for centre in pref_list:
 
-            for college in colleges:
-
-                if college not in slot:
+                if centre not in slot:
                     continue
 
-                # ENG
-                if cand['eng']=='Y':
-                    for d in range(1,7):
-                        k = (d,"AFTERNOON","ENG")
-                        if slot[college][k] > 0:
+                for d in [1,2]:
+                    k = (d,"MORNING","BPHARM")
 
-                            slot[college][k] -= 1
+                    if slot[centre][k] > 0:
 
-                            results.append({
-                                "ApplNo": applno,
-                                "Name": name,
-                                "Preferred Centre": pref_centre,
-                                "Allotted Centre": centre,
-                                "CollegeCode": college,
-                                "Exam": "ENG",
-                                "Day": d,
-                                "Session": "AFTERNOON"
-                            })
+                        slot[centre][k] -= 1
 
-                            allocated = True
-                            break
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Exam": "BPHARM",
+                            "Day": d,
+                            "Session": "MORNING"
+                        })
 
-                # BPHARM
-                if cand['bpharm']=='Y':
-                    for d in [1,2]:
-                        k = (d,"MORNING","BPHARM")
-                        if slot[college][k] > 0:
+                        allocated_any = True
+                        break
 
-                            slot[college][k] -= 1
-
-                            results.append({
-                                "ApplNo": applno,
-                                "Name": name,
-                                "Preferred Centre": pref_centre,
-                                "Allotted Centre": centre,
-                                "CollegeCode": college,
-                                "Exam": "BPHARM",
-                                "Day": d,
-                                "Session": "MORNING"
-                            })
-
-                            allocated = True
-                            break
-
-                if allocated:
+                if allocated_any:
                     break
 
-            if allocated:
-                break
+        # -------------------
+        # ENG NEXT
+        # -------------------
+        if cand['eng'] == 'Y':
 
-        if not allocated:
+            allocated_eng = False
+
+            for centre in pref_list:
+
+                if centre not in slot:
+                    continue
+
+                for d in range(1,7):
+                    k = (d,"AFTERNOON","ENG")
+
+                    if slot[centre][k] > 0:
+
+                        slot[centre][k] -= 1
+
+                        results.append({
+                            "ApplNo": applno,
+                            "Name": name,
+                            "Preferred Centre": pref_centre,
+                            "Allotted Centre": centre,
+                            "CollegeCode": centre,
+                            "Exam": "ENG",
+                            "Day": d,
+                            "Session": "AFTERNOON"
+                        })
+
+                        allocated_eng = True
+                        break
+
+                if allocated_eng:
+                    break
+
+            if allocated_eng:
+                allocated_any = True
+
+        if not allocated_any:
             not_allotted += 1
 
     df = pd.DataFrame(results)
 
-    # -------------------------------
-    # OUTPUT
-    # -------------------------------
+    # Output
     st.success("✅ Completed")
 
     st.write("Total Candidates:", len(merged))
